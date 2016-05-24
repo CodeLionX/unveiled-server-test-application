@@ -13,6 +13,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.HttpContent;
+import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.rtsp.RtspHeaders;
@@ -29,8 +31,17 @@ import sas.systems.imflux.session.rtsp.SimpleRtspSession;
  */
 public class ClientStarter implements RtspResponseListener {
 	
+	// configuration properties ---------------------------------------------------------------------------------------
+	private static final String HOST = "localhost";
+	private static final int RTP_PORT = 50000;
+	private static final int RTCP_PORT = 50001;
+	private static final int RTSP_PORT = 1935;
+	private static final String REMOTE_HOST = "192.168.1.102";
+	private static final int REMOTE_RTSP_PORT = 554;
+	
 	private static final String ID = "unveiled-test-app:0";
-	public final static int CRLF  = 0x0D0A;
+	
+	public static final int CRLF  = 0x0D0A;
 	
 	private static enum RtspMethodSeq {
 		INVALID(-1, "INVALID"),
@@ -85,25 +96,27 @@ public class ClientStarter implements RtspResponseListener {
 	private final AtomicInteger cSeqCounter;
 	private final SocketAddress remoteAddress;
 	private final AtomicBoolean receivedResponse;
+	private final AtomicBoolean validResponse;
 	
 	private String sessionId = null;
 	
 	public ClientStarter() {
-		System.out.println("\tSetting up local session:");
-		System.out.println("\tRTP:\tlocalhost:50000");
-		System.out.println("\tRTCP\tlocalhost:50001");
-		System.out.println("\tRTSP:\tlocalhost:554");
-		final RtpParticipant localRtpParticipant = RtpParticipant.createReceiver("localhost", 50000, 50001);
-        final SocketAddress localAddress = new InetSocketAddress("localhost", 554);
+		System.out.println("\tSetting up local session with ID " + ID + ":");
+		System.out.println("\tRTP:\t" + HOST + ":" + RTP_PORT);
+		System.out.println("\tRTCP\t" + HOST + ":" + RTCP_PORT);
+		System.out.println("\tRTSP:\t" + HOST + ":" + RTSP_PORT);
+		final RtpParticipant localRtpParticipant = RtpParticipant.createReceiver(HOST, RTP_PORT, RTCP_PORT);
+        final SocketAddress localAddress = new InetSocketAddress(HOST, RTSP_PORT);
         this.session = new SimpleRtspSession(ID, localRtpParticipant, localAddress);
         
         this.baseURI = "rtsp://sas.systemgrid.de/";
         this.cSeqCounter = new AtomicInteger(1);
         this.receivedResponse = new AtomicBoolean(false);
+        this.validResponse = new AtomicBoolean(false);
         
         System.out.println("\n\tUsing following remote connection:");
-        System.out.println("\tremote RTCP:\tlocalhost:1935");
-        this.remoteAddress = new InetSocketAddress("localhost", 1935);
+        System.out.println("\tremote RTCP:\t" + REMOTE_HOST + ":" + REMOTE_RTSP_PORT);
+        this.remoteAddress = new InetSocketAddress(REMOTE_HOST, REMOTE_RTSP_PORT);
 	}
 	
     public static void main(String[] args ) {
@@ -115,24 +128,38 @@ public class ClientStarter implements RtspResponseListener {
         System.out.println("... finished.\n");
         
         System.out.println("Sending OPTIONS request");
-        if(client.sendOptionsRequest()) {
+        if(!client.sendOptionsRequest()) {
         	System.err.println("No connection, no response or error....closing application!");
+        	client.shutdown();
+        	return;
         }
         
-        System.out.println("Sending ANNOUNCE without login information");
+        System.out.println("Sending ANNOUNCE");
+        if(!client.sendAnnounceRequest(false)) {
+        	System.err.println("No connection, no response or error....retrying with login information!");
+        }
+        
+        System.out.println("Sending ANNOUNCE with login information");
+        if(!client.sendAnnounceRequest(true)) {
+        	System.err.println("No connection, no response or error....closing application!");
+        	client.shutdown();
+        	return;
+        }
+        
+        System.out.println("Received session id: " + client.sessionId);
         
         System.out.println("Closing connection");
         client.shutdown();
     }
     
-	public boolean startup() {
+	public synchronized boolean startup() {
     	this.session.setUseNio(true);
     	this.session.setAutomatedRtspHandling(false);
     	this.session.addResponseListener(this);
     	return this.session.init();
     }
     
-    public void shutdown() {
+    public synchronized void shutdown() {
     	this.session.terminate();
     }
     
@@ -162,12 +189,12 @@ public class ClientStarter implements RtspResponseListener {
     	writeLine(content, "a=fmtp:96 packetization-mode=1;profile-level-id=420014;sprop-parameter-sets=J0IAFKaCxMQ=,KM48gA==;");
     	writeLine(content, "a=control:trackID=1");
     	
-    	HttpRequest request = new DefaultFullHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.OPTIONS, this.baseURI + "teststream", content);
+    	HttpRequest request = new DefaultFullHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.ANNOUNCE, this.baseURI + "teststream", content);
     	request.headers().add(RtspHeaders.Names.CSEQ, RtspMethodSeq.ANNOUNCE.cSeq());
     	request.headers().add(RtspHeaders.Names.CONTENT_TYPE, "application/sdp");
-    	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, content.capacity());
+    	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, content.readableBytes());
     	if(withAuthorization)
-    		request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest realm=\"2\", nonce=\"token\"");
+    		request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest username=\"2\", nonce=\"token\"");
     	// authorization n/a
 		boolean wasSend = this.session.sendRequest(request, remoteAddress);
 		
@@ -182,6 +209,7 @@ public class ClientStarter implements RtspResponseListener {
 
 	@Override
 	public void responseReceived(HttpResponse message, RtspParticipant participant) {
+		this.receivedResponse.set(true);
 		int cseq = -1;
 		
 		try {
@@ -190,14 +218,23 @@ public class ClientStarter implements RtspResponseListener {
 			System.err.println("Response with missing or wrong sequence number!");
 		}
 		
-		if(this.cSeqCounter.compareAndSet(cseq, cseq+1)) {
-			System.out.println("Got message with wrong sequence number: " + cseq);
-			// leave method if wrong sequence number
-			return;
-		}
-		System.out.println(message);
+//		if(this.cSeqCounter.compareAndSet(cseq, cseq+1)) {
+//			System.out.println("Got message with wrong sequence number: " + cseq);
+//			// leave method if wrong sequence number
+//			this.validResponse.set(false);
+//			synchronized (this) {
+//				this.notifyAll();
+//			}
+//			return;
+//		}
+		System.out.println("Response received: ");
+		System.out.println("\t" + message.toString().replaceAll("\r\n", "\n\t"));
 		if(message.getStatus().code() != 200) {
 			System.err.println("Received error response: " + message.getStatus().reasonPhrase());
+			this.validResponse.set(false);
+			synchronized (this) {
+				this.notifyAll();
+			}
 			return;
 		}
 		
@@ -232,15 +269,24 @@ public class ClientStarter implements RtspResponseListener {
 
 		case INVALID:
 		default:
+			// leave method when wrong response
+			this.validResponse.set(false);
+			synchronized (this) {
+				this.notifyAll();
+			}
 			return;
 		}
 		
-		this.receivedResponse.set(true);
-		this.notifyAll();
+		this.validResponse.set(true);
+		synchronized (this) {
+			this.notifyAll();
+		}
 	}
 	
 
     private boolean waitForResponse() {
+    	this.validResponse.set(false);
+    	// acquire lock and wait for response
     	synchronized (this) {
 			while(!receivedResponse.get()) {
 				try {
@@ -253,6 +299,6 @@ public class ClientStarter implements RtspResponseListener {
 			}
 			receivedResponse.set(false);
 		}
-		return true;
+		return this.validResponse.get();
     }
 }
