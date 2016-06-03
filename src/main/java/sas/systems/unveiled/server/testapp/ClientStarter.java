@@ -13,8 +13,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpRequest;
-import io.netty.handler.codec.http.HttpContent;
-import io.netty.handler.codec.http.HttpMessage;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.rtsp.RtspHeaders;
@@ -204,7 +202,7 @@ public class ClientStarter implements RtspResponseListener {
     
     private void writeLine(ByteBuf buf, String text) {
     	buf.writeBytes(text.getBytes(Charset.forName("UTF-8")));
-    	buf.writeByte(CRLF);
+    	buf.writeInt(CRLF);
     }
 
 	@Override
