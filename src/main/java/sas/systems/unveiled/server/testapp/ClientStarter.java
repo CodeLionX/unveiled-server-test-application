@@ -89,6 +89,7 @@ public class ClientStarter implements RtspResponseListener {
 		}
 	}
 	
+	private final String filename;
 	private final String baseURI;
 	private final SimpleRtspSession session;
 	private final AtomicInteger cSeqCounter;
@@ -108,6 +109,7 @@ public class ClientStarter implements RtspResponseListener {
         this.session = new SimpleRtspSession(ID, localRtpParticipant, localAddress);
         
         this.baseURI = "rtsp://sas.systemgrid.de/";
+        this.filename = "testfile.mp4";
         this.cSeqCounter = new AtomicInteger(1);
         this.receivedResponse = new AtomicBoolean(false);
         this.validResponse = new AtomicBoolean(false);
@@ -132,10 +134,10 @@ public class ClientStarter implements RtspResponseListener {
         	return;
         }
         
-        System.out.println("Sending ANNOUNCE");
-        if(!client.sendAnnounceRequest(true)) {
-        	System.err.println("No connection, no response or error....retrying with login information!");
-        }
+//        System.out.println("Sending ANNOUNCE");
+//        if(!client.sendAnnounceRequest(false)) {
+//        	System.err.println("No connection, no response or error....retrying with login information!");
+//        }
         
         System.out.println("Sending ANNOUNCE with login information");
         if(!client.sendAnnounceRequest(true)) {
@@ -145,6 +147,36 @@ public class ClientStarter implements RtspResponseListener {
         }
         
         System.out.println("Received session id: " + client.sessionId);
+        
+        System.out.println("Sending SETUP");
+        if(!client.sendSetupRequest()) {
+        	System.err.println("No connection, no response or error....closing application!");
+        	client.shutdown();
+        	return;
+        }
+        
+        System.out.println("Sending RECORD");
+        if(!client.sendRecordRequest()) {
+        	System.err.println("No connection, no response or error....closing application!");
+        	client.shutdown();
+        	return;
+        }
+        
+        // simulate some work
+        try {
+        	Thread.sleep(2000l);
+        } catch(InterruptedException e) {
+        	// wow
+        	client.shutdown();
+        	return;
+        }
+        
+        System.out.println("Sending TEARDOWN");
+        if(!client.sendTeardownRequest()) {
+        	System.err.println("No connection, no response or error....closing application!");
+        	client.shutdown();
+        	return;
+        }
         
         System.out.println("Closing connection");
         client.shutdown();
@@ -187,7 +219,7 @@ public class ClientStarter implements RtspResponseListener {
     	writeLine(content, "a=fmtp:96 packetization-mode=1;profile-level-id=420014;sprop-parameter-sets=J0IAFKaCxMQ=,KM48gA==;");
     	writeLine(content, "a=control:trackID=1");
     	
-    	HttpRequest request = new DefaultFullHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.ANNOUNCE, this.baseURI + "teststream", content);
+    	HttpRequest request = new DefaultFullHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.ANNOUNCE, this.baseURI + this.filename, content);
     	request.headers().add(RtspHeaders.Names.CSEQ, RtspMethodSeq.ANNOUNCE.cSeq());
     	request.headers().add(RtspHeaders.Names.CONTENT_TYPE, "application/sdp");
     	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, content.readableBytes());
@@ -201,8 +233,37 @@ public class ClientStarter implements RtspResponseListener {
     }
     
     public boolean sendSetupRequest() {
-    	final HttpRequest request = new DefaultHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.SETUP, this.baseURI);
+    	final HttpRequest request = new DefaultHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.SETUP, this.baseURI + this.filename);
     	request.headers().add(RtspHeaders.Names.CSEQ, RtspMethodSeq.SETUP.cSeq());
+    	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, 0);
+    	request.headers().add(RtspHeaders.Names.SESSION, this.sessionId);
+    	request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest username=\"2\", nonce=\"token\"");
+    	request.headers().add(RtspHeaders.Names.TRANSPORT, 
+    			"RTP/AVP/UDP;unicast;client_port=" + RTP_PORT + "-" + RTCP_PORT + ";mode=receive");
+    	
+		final boolean wasSend = this.session.sendRequest(request, remoteAddress);
+		
+		// wait for response
+		return wasSend && waitForResponse();
+	}
+    
+    public boolean sendRecordRequest() {
+    	final HttpRequest request = new DefaultHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.RECORD, this.baseURI + this.filename);
+    	request.headers().add(RtspHeaders.Names.CSEQ, RtspMethodSeq.RECORD.cSeq());
+    	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, 0);
+    	request.headers().add(RtspHeaders.Names.SESSION, this.sessionId);
+    	request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest username=\"2\", nonce=\"token\"");
+    	request.headers().add(RtspHeaders.Names.RANGE, "npt=0.000-");
+    	
+		final boolean wasSend = this.session.sendRequest(request, remoteAddress);
+		
+		// wait for response
+		return wasSend && waitForResponse();
+	}
+    
+    public boolean sendTeardownRequest() {
+    	final HttpRequest request = new DefaultHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.TEARDOWN, this.baseURI + this.filename);
+    	request.headers().add(RtspHeaders.Names.CSEQ, RtspMethodSeq.TEARDOWN.cSeq());
     	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, 0);
     	request.headers().add(RtspHeaders.Names.SESSION, this.sessionId);
     	request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest username=\"2\", nonce=\"token\"");
@@ -271,19 +332,19 @@ public class ClientStarter implements RtspResponseListener {
 		case SETUP:
 			// extract server ports
 			final String transport = message.headers().get(RtspHeaders.Names.TRANSPORT);
-			final int lastIndexEq = transport.lastIndexOf('=');
-			final String server_ports = transport.substring(lastIndexEq+1, transport.length());
-			final int indexMin = server_ports.indexOf('-');
-			int data = Integer.valueOf(server_ports.substring(0, indexMin));
-			int control = Integer.valueOf(server_ports.substring(indexMin+1, server_ports.length()));
-			System.out.println("Server data port: " + data + "\nServer control port: " + control);
+//			final int lastIndexEq = transport.lastIndexOf('=');
+//			final String server_ports = transport.substring(lastIndexEq+1, transport.length());
+//			final int indexMin = server_ports.indexOf('-');
+//			int data = Integer.valueOf(server_ports.substring(0, indexMin));
+//			int control = Integer.valueOf(server_ports.substring(indexMin+1, server_ports.length()));
+//			System.out.println("Server data port: " + data + "\nServer control port: " + control);
 			
 			break;
 		case RECORD:
-
+			System.out.println("RECORD was successful");
 			break;
 		case TEARDOWN:
-
+			System.out.println("TEARDOWN was successful");
 			break;	
 
 		case INVALID:
