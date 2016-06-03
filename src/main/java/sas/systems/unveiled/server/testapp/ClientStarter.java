@@ -133,7 +133,7 @@ public class ClientStarter implements RtspResponseListener {
         }
         
         System.out.println("Sending ANNOUNCE");
-        if(!client.sendAnnounceRequest(false)) {
+        if(!client.sendAnnounceRequest(true)) {
         	System.err.println("No connection, no response or error....retrying with login information!");
         }
         
@@ -193,12 +193,25 @@ public class ClientStarter implements RtspResponseListener {
     	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, content.readableBytes());
     	if(withAuthorization)
     		request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest username=\"2\", nonce=\"token\"");
-    	// authorization n/a
+    	// session n/a
 		boolean wasSend = this.session.sendRequest(request, remoteAddress);
 		
 		// wait for response
 		return wasSend && waitForResponse();
     }
+    
+    public boolean sendSetupRequest() {
+    	final HttpRequest request = new DefaultHttpRequest(RtspVersions.RTSP_1_0, RtspMethods.SETUP, this.baseURI);
+    	request.headers().add(RtspHeaders.Names.CSEQ, RtspMethodSeq.SETUP.cSeq());
+    	request.headers().add(RtspHeaders.Names.CONTENT_LENGTH, 0);
+    	request.headers().add(RtspHeaders.Names.SESSION, this.sessionId);
+    	request.headers().add(RtspHeaders.Names.AUTHORIZATION, "Digest username=\"2\", nonce=\"token\"");
+    	
+		final boolean wasSend = this.session.sendRequest(request, remoteAddress);
+		
+		// wait for response
+		return wasSend && waitForResponse();
+	}
     
     private void writeLine(ByteBuf buf, String text) {
     	buf.writeBytes(text.getBytes(Charset.forName("UTF-8")));
@@ -256,7 +269,15 @@ public class ClientStarter implements RtspResponseListener {
 			}
 			break;
 		case SETUP:
-
+			// extract server ports
+			final String transport = message.headers().get(RtspHeaders.Names.TRANSPORT);
+			final int lastIndexEq = transport.lastIndexOf('=');
+			final String server_ports = transport.substring(lastIndexEq+1, transport.length());
+			final int indexMin = server_ports.indexOf('-');
+			int data = Integer.valueOf(server_ports.substring(0, indexMin));
+			int control = Integer.valueOf(server_ports.substring(indexMin+1, server_ports.length()));
+			System.out.println("Server data port: " + data + "\nServer control port: " + control);
+			
 			break;
 		case RECORD:
 
